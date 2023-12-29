@@ -8,3 +8,8 @@ sentencepiece
 protobuf<4
 timm
 panopticapi@git+https://github.com/cocodataset/panopticapi.git
+
+einops
+pycocotools
+xformers
+apex

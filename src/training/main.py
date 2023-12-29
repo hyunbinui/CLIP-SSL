@@ -21,6 +21,9 @@ from training.scheduler import cosine_lr, const_lr, const_lr_cooldown
 from training.train import train_one_epoch, evaluate, student_teacher_ensemble
 from training.file_utils import pt_load
 
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+os.environ['TORCH_USE_CUDA_DSA'] = "1"
+
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
