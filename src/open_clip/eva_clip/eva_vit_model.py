@@ -336,9 +336,9 @@ class Attention(nn.Module):
             k = torch.cat((k[:, :, :1, :], ro_k_t), -2).type_as(v)
 
         if self.xattn:
-            q = q.permute(0, 2, 1, 3)   # B, num_heads, N, C -> B, N, num_heads, C
-            k = k.permute(0, 2, 1, 3)
-            v = v.permute(0, 2, 1, 3)
+            # q = q.permute(0, 2, 1, 3)   # B, num_heads, N, C -> B, N, num_heads, C
+            # k = k.permute(0, 2, 1, 3)
+            # v = v.permute(0, 2, 1, 3)
 
             # x = xops.memory_efficient_attention(
             #     q, k, v,

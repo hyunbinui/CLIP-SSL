@@ -2,10 +2,11 @@
 
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
-#SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=1
+#SBATCH --ntasks-per-node=4             # num process per node
+#SBATCH --cpus-per-task=1               # num cpu cores per process (total num core of a node / total num gpus of a node * requested num gpu)
 #SBATCH --wait-all-nodes=1
-#SBATCH --job-name=clipself
+#SBATCH --job-name=clipself_n1_b4
+#SBATCH --time=0-12:00:00
 #SBATCH --output=./src/slurm_logs/S-%x.%j.out
 
 eval "$(conda shell.bash hook)"
@@ -20,7 +21,7 @@ current_time=$(date "+%Y.%m.%d-%H.%M.%S")
 
 cd src
 
-srun --cpu-bind=v --accel-bind=gn python -m training.main --batch-size=2 --lr=1e-5 --wd=0.1 --epochs=6 --workers=4 \
+srun --cpu-bind=v --accel-bind=gn python -m training.main --batch-size=4 --lr=1e-5 --wd=0.1 --epochs=6 --workers=4 \
 --model EVA02-CLIP-B-16 --pretrained eva --warmup 1000  --zeroshot-frequency 1 --dataset-type grid_distill  \
 --test-type coco_panoptic --train-data /shared/s2/lab01/dataset/zeroseg/coco/annotations/instances_train2017.json \
 --val-data /shared/s2/lab01/dataset/zeroseg/coco/annotations/panoptic_val2017.json \
