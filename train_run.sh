@@ -1,11 +1,13 @@
 #!/bin/bash -x
 
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4
-#SBATCH --ntasks-per-node=4             # num process per node
+#SBATCH --gres=gpu:2
+#SBATCH --ntasks-per-node=2             # num process per node
 #SBATCH --cpus-per-task=1               # num cpu cores per process (total num core of a node / total num gpus of a node * requested num gpu)
 #SBATCH --wait-all-nodes=1
-#SBATCH --job-name=clipself_n1_b2_fullattn
+#SBATCH --mem=10000MB                   # Using 10GB CPU Memory
+#SBATCH --job-name=n1_g1_b2
+#SBATCH --exclude=b[18,14]
 #SBATCH --time=0-12:00:00
 #SBATCH --output=./src/slurm_logs/S-%x.%j.out
 
@@ -28,5 +30,5 @@ srun --cpu-bind=v --accel-bind=gn python -m training.main --save-most-recent --d
 --embed-path ../metadata/coco_panoptic_clip_hand_craft_EVACLIP_ViTB16.npy --train-image-root /shared/s2/lab01/dataset/zeroseg/coco/train2017 \
 --val-image-root /shared/s2/lab01/dataset/zeroseg/coco/val2017  --cache-dir ../checkpoints/EVA02_CLIP_B_psz16_s8B.pt --log-every-n-steps 50 \
 --lock-image --save-frequency 6 --lock-image-unlocked-groups 12 --extract-type="v2" \
---name clipself_coco_6_save6_test1_eva_vitb16_12layers_$current_time --downsample-factor 16 --det-image-size 1024 \
+--name clipself_coco_6_test1_eva_vitb16_12layers_$current_time --downsample-factor 16 --det-image-size 1024 \
 --alpha 0.7
