@@ -292,7 +292,7 @@ class Attention(nn.Module):
             self.relative_position_bias_table = None
             self.relative_position_index = None
 
-        self.attn_drop_rate = attn_drop
+        self.xattn_drop_rate = attn_drop
         self.attn_drop = nn.Dropout(attn_drop)
         self.inner_attn_ln = norm_layer(all_head_dim) if subln else nn.Identity()
         # self.proj = nn.Linear(all_head_dim, all_head_dim)
@@ -340,18 +340,23 @@ class Attention(nn.Module):
             # k = k.permute(0, 2, 1, 3)
             # v = v.permute(0, 2, 1, 3)
 
+            #   0.0, 0.125, None
             # x = xops.memory_efficient_attention(
             #     q, k, v,
             #     p=self.xattn_drop,
             #     scale=self.scale,
             #     attn_bias=attn_mask   # to allow masked attention
             #     )
+
             x = memory_efficient_attention(
                 q, k, v,
-                dropout=self.attn_drop_rate,
+                dropout=self.xattn_drop_rate,
                 scale=self.scale,
-                attn_bias=attn_mask
+                attn_bias=attn_mask,
+                training=True
             )
+            x = x.permute(0, 2, 1, 3)
+
             x = x.reshape(B, N, -1)
             x = self.inner_attn_ln(x)
             x = self.proj(x)
