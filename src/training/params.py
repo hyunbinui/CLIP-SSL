@@ -465,6 +465,15 @@ def parse_args(args):
         help="If true, delete previous checkpoint after storing a new one."
     )
 
+    '''
+        3 JAN 24: add contrastive loss
+    '''
+    parser.add_argument(
+        "--use-contrastive-loss",
+        action="store_true",
+        default=False,
+    )
+
     args = parser.parse_args(args)
 
     # If some params are not passed, we use the default values based on model name.
