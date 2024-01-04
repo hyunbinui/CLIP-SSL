@@ -181,19 +181,6 @@ def main(args):
                 logging.info(f"  {name}: {val}")
                 f.write(f"{name}: {val}\n")
 
-    if args.distributed:
-        if args.use_bn_sync:
-            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        ddp_args = {}   # {"find_unused_parameters": True}
-        if args.ddp_static_graph:
-            # this doesn't exist in older PyTorch, arg only added if enabled
-            ddp_args['static_graph'] = True
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
-        if args.dataset_type == 'region_clip':
-            method = torch.nn.parallel.DistributedDataParallel(method, device_ids=[device], **ddp_args)
-        if dist_model is not None:
-            dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
-
     # create optimizer and scaler
     optimizer = None
     scaler = None
@@ -225,7 +212,8 @@ def main(args):
             start_epoch = checkpoint["epoch"]
             sd = checkpoint["state_dict"]
             if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
-                sd = {k[len('module.'):]: v for k, v in sd.items()}
+                    sd = {k[len('module.'):]: v for k, v in sd.items()}
+
             model.load_state_dict(sd)
             if optimizer is not None:
                 optimizer.load_state_dict(checkpoint["optimizer"])
@@ -236,6 +224,19 @@ def main(args):
             # loading a bare (model only) checkpoint for fine-tune or evaluation
             model.load_state_dict(checkpoint)
             logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
+
+    if args.distributed:
+        if args.use_bn_sync:
+            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        ddp_args = {}   # {"find_unused_parameters": True}
+        if args.ddp_static_graph:
+            # this doesn't exist in older PyTorch, arg only added if enabled
+            ddp_args['static_graph'] = True
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
+        if args.dataset_type == 'region_clip':
+            method = torch.nn.parallel.DistributedDataParallel(method, device_ids=[device], **ddp_args)
+        if dist_model is not None:
+            dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
 
     # initialize datasets
     data = get_data(args, (preprocess_train, preprocess_val), epoch=start_epoch, tokenizer=get_tokenizer(args.model))
