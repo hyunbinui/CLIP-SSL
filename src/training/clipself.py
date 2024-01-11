@@ -32,21 +32,7 @@ class CLIPSelf:
             rois_list.append(bboxes_per_image[valid, :4])
             crops_list.append(crops_per_image[valid])
 
-        if args.use_contrastive_loss is False:
-            image_crops = torch.cat(crops_list)
-
-            with torch.no_grad():
-                teacher_crop_features = dist_model.encode_image(image_crops, normalize=False)
-            student_roi_features = model.encode_pseudo_boxes(images, rois_list, normalize=False,
-                                                            extract_type=args.extract_type)
-
-            normed_student_features = F.normalize(student_roi_features, dim=-1)
-            normed_teacher_features = F.normalize(teacher_crop_features, dim=-1)
-
-            loss_cosine = 1.0 - (normed_student_features *
-                                normed_teacher_features).sum(-1).mean()
-            losses = dict(loss_cosine=loss_cosine*args.cosine_weight)
-        else:
+        if args.use_contrastive_loss:
             '''
                 2 JAN 24: add contrastive loss
             '''
@@ -62,9 +48,49 @@ class CLIPSelf:
             denormed_boxes = self._denormalize_boxes(rois_list, student_dense_features)
 
             contrastive_loss = self.infonce(normed_student_features, normed_teacher_features, denormed_boxes)
-
             losses = dict(contrastive_loss=contrastive_loss)
+        elif args.use_inter_loss:
+            image_crops = torch.cat(crops_list)
+            
+            with torch.no_grad():
+                teacher_crop_features = dist_model.encode_image(image_crops, normalize=False)
+            # basic loss
+            student_roi_features = model.encode_pseudo_boxes(images, rois_list, normalize=False,
+                                                            extract_type=args.extract_type)
 
+            normed_student_features = F.normalize(student_roi_features, dim=-1)
+            normed_teacher_features = F.normalize(teacher_crop_features, dim=-1)
+
+            loss_cosine = 1.0 - (normed_student_features *
+                                normed_teacher_features).sum(-1).mean()
+
+            # auxilarary loss (inter loss)
+            student_dense_features = model.encode_dense(images, normalize=False, keep_shape=True)
+            normed_student_features = F.normalize(student_dense_features, dim=-1)
+
+            denormed_boxes = self._denormalize_boxes(rois_list, student_dense_features)
+
+            loss_inter = self.loss_inter_features_weighted(denormed_boxes, student_dense_features) if args.use_weighted_loss else self.loss_inter_features(denormed_boxes, student_dense_features)
+
+            losses = dict(loss_cosine=loss_cosine*args.cosine_weight, loss_inter=loss_inter * 0.1)
+        else:
+            '''
+                basic clipself loss
+            '''
+            image_crops = torch.cat(crops_list)
+
+            with torch.no_grad():
+                teacher_crop_features = dist_model.encode_image(image_crops, normalize=False)
+            student_roi_features = model.encode_pseudo_boxes(images, rois_list, normalize=False,
+                                                            extract_type=args.extract_type)
+
+            normed_student_features = F.normalize(student_roi_features, dim=-1)
+            normed_teacher_features = F.normalize(teacher_crop_features, dim=-1)
+
+            loss_cosine = 1.0 - (normed_student_features *
+                                normed_teacher_features).sum(-1).mean()
+            losses = dict(loss_cosine=loss_cosine*args.cosine_weight)
+            
         return losses, len(images), model.logit_scale.exp()
 
     def _denormalize_boxes(self, normed_boxes, x):
@@ -77,9 +103,7 @@ class CLIPSelf:
             denormed_boxes.append(new_boxes)
         return denormed_boxes
     
-    def infonce(self, dense_features, crop_features, denormed_boxes, temperature=0.1, reduction='mean'):
-        
-        # logits, labels = [], []
+    def infonce(self, dense_features, crop_features, denormed_boxes, temperature=1., reduction='mean'):
         crop_idx = 0
         loss = []
 
@@ -101,8 +125,54 @@ class CLIPSelf:
                 
                 # shape of sim_matrix: [num of patches per box, num of patches per box + 1]
                 sim_matrix = torch.matmul(box_dense_features, box_dense_features.T).fill_diagonal_(0)[1:,:]
+
+                '''
+                    8 JAN 24: reduce an impact of negative samples
+                '''  
+                sim_matrix[:,1:] *= 0.1
+
                 label = torch.zeros(sim_matrix.shape[0], dtype=torch.long, device=sim_matrix.device)
 
-                loss.append(F.cross_entropy(sim_matrix / temperature, label, reduction=reduction))
+                loss.append(F.cross_entropy(sim_matrix/temperature, label, reduction=reduction))
 
         return sum(loss) / len(loss)
+    
+    '''
+        8 JAN 24: add inter loss
+    '''    
+    def loss_inter_features(self, denormed_boxes, dense_features):
+        result = 0
+        count = 0
+        
+        for i in range(len(denormed_boxes)):
+            boxes_single_image = denormed_boxes[i].round().int()
+            for j in range(len(boxes_single_image)):
+                box = boxes_single_image[j]
+                
+                cropped_features = dense_features[i, :, box[0]:box[2], box[1]:box[3]]
+                #avg_features = cropped_features.reshape(cropped_features.shape[0], -1).mean(1)
+                cropped_features = cropped_features.reshape(cropped_features.shape[0], -1).transpose(0, 1)
+                dot_matrix = torch.matmul(cropped_features, cropped_features.T).fill_diagonal_(0) #.sum() / 2
+                result += torch.mean(dot_matrix)
+                count += 1
+
+        return 1-(result / count)
+
+    def loss_inter_features_weighted(self, denormed_boxes, dense_features):
+        result = 0
+        count = 0
+        
+        for i in range(len(denormed_boxes)):
+            boxes_single_image = denormed_boxes[i].round().int()
+            for j in range(len(boxes_single_image)):
+                box = boxes_single_image[j]
+                
+                cropped_features = dense_features[i, :, box[0]:box[2], box[1]:box[3]]
+                cropped_features = cropped_features.reshape(cropped_features.shape[0], -1).transpose(0, 1)
+                
+                dot_matrix = torch.matmul(cropped_features, cropped_features.T)
+                weighted_dot_matrix = F.softmax(dot_matrix.clone().fill_diagonal_(-float("Inf")), dim=1) * dot_matrix
+                result += torch.sum(weighted_dot_matrix) / cropped_features.shape[0]
+                count += 1
+
+        return 1-(result / count)

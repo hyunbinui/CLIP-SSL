@@ -164,6 +164,14 @@ def train_one_epoch(model, method, data, loss, epoch, optimizer, scaler, schedul
             batch_time_m.reset()
             data_time_m.reset()
 
+    # save trainig results at each epoch
+    # torch.save({
+    #         'epoch': epoch,
+    #         'optimizer_state_dict': optimizer.state_dict(),
+    #         'model_state_dict': model.state_dict(),
+    #         'scaler': scaler
+    #     }, f'{args.checkpoint_path}.{epoch:04d}.pth')
+
 
 def evaluate(model, data, epoch, args):
     metrics = {}

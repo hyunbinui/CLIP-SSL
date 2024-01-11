@@ -473,6 +473,21 @@ def parse_args(args):
         action="store_true",
         default=False,
     )
+    
+    '''
+        8 JAN 24: add inter loss
+    '''
+    parser.add_argument(
+        "--use-inter-loss",
+        action="store_true",
+        default=False,
+    )
+    
+    parser.add_argument(
+        "--use-weighted-loss",
+        action="store_true",
+        default=False,
+    )
 
     args = parser.parse_args(args)
 
