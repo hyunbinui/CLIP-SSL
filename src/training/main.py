@@ -96,14 +96,12 @@ def main(args):
             f"p_{args.precision}",
         ])
 
-    # log_base_path = os.path.join(args.logs, args.name)
-    # args.log_path = None
+    log_base_path = os.path.join(args.logs, args.name)
+    args.log_path = None
     if is_master(args, local=args.log_local):
-        # os.makedirs(log_base_path, exist_ok=True)
-        os.makedirs(args.log_path, exist_ok=True)
+        os.makedirs(log_base_path, exist_ok=True)
         log_filename = f'out-{args.rank}' if args.log_local else 'out.log'
-        # args.log_path = os.path.join(log_base_path, log_filename)
-        args.log_path = os.path.join(args.log_path, log_filename)
+        args.log_path = os.path.join(log_base_path, log_filename)
         if os.path.exists(args.log_path):
             print(
                 "Error. Experiment already exists. Use --name {} to specify a new experiment."
@@ -113,8 +111,7 @@ def main(args):
     # Setup text logger
     args.log_level = logging.DEBUG if args.debug else logging.INFO
     setup_logging(args.log_path, args.log_level)
-    # args.checkpoint_path = os.path.join(log_base_path, "checkpoints")
-    args.checkpoint_path = os.path.join(args.log_path, "checkpoints")
+    args.checkpoint_path = os.path.join(log_base_path, "checkpoints")
 
     if args.precision == 'fp16':
         logging.warning(
