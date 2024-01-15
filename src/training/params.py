@@ -488,6 +488,15 @@ def parse_args(args):
         action="store_true",
         default=False,
     )
+    
+    '''
+        15 JAN 24: add log path as argument
+    '''
+    parser.add_argument(
+        "--log-path",
+        action="str",
+        default='./out',
+    )
 
     args = parser.parse_args(args)
 

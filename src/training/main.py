@@ -21,6 +21,9 @@ from training.scheduler import cosine_lr, const_lr, const_lr_cooldown
 from training.train import train_one_epoch, evaluate, student_teacher_ensemble
 from training.file_utils import pt_load
 
+import wandb
+from training.dbLog import set_db
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 os.environ['TORCH_USE_CUDA_DSA'] = "1"
 
@@ -58,6 +61,13 @@ def get_latest_checkpoint(path: str, remote : bool):
 def main(args):
     args = parse_args(args)
 
+    '''
+        15 JAN, 2024
+        Setting DB to watch logs(loss)
+    '''
+    set_db(args)
+
+
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
         # float16 and almost as accurate as float32
@@ -86,12 +96,14 @@ def main(args):
             f"p_{args.precision}",
         ])
 
-    log_base_path = os.path.join(args.logs, args.name)
-    args.log_path = None
+    # log_base_path = os.path.join(args.logs, args.name)
+    # args.log_path = None
     if is_master(args, local=args.log_local):
-        os.makedirs(log_base_path, exist_ok=True)
+        # os.makedirs(log_base_path, exist_ok=True)
+        os.makedirs(args.log_path, exist_ok=True)
         log_filename = f'out-{args.rank}' if args.log_local else 'out.log'
-        args.log_path = os.path.join(log_base_path, log_filename)
+        # args.log_path = os.path.join(log_base_path, log_filename)
+        args.log_path = os.path.join(args.log_path, log_filename)
         if os.path.exists(args.log_path):
             print(
                 "Error. Experiment already exists. Use --name {} to specify a new experiment."
@@ -101,7 +113,8 @@ def main(args):
     # Setup text logger
     args.log_level = logging.DEBUG if args.debug else logging.INFO
     setup_logging(args.log_path, args.log_level)
-    args.checkpoint_path = os.path.join(log_base_path, "checkpoints")
+    # args.checkpoint_path = os.path.join(log_base_path, "checkpoints")
+    args.checkpoint_path = os.path.join(args.log_path, "checkpoints")
 
     if args.precision == 'fp16':
         logging.warning(
@@ -273,6 +286,8 @@ def main(args):
     evaluate(model, data, start_epoch, args)
 
     loss = None
+    
+    wandb.watch(model)
 
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
