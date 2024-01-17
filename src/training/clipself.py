@@ -1,8 +1,14 @@
 import random
 import torch
 import torch.nn.functional as F
+import logging
+
+import wandb
 
 class CLIPSelf:
+    def __init__(self):
+        self.temp_iter = 0
+
     def __call__(self, batch, model, dist_model, loss, device, cast_dtype, distributed, args):
         if distributed:
             model = model.module
@@ -42,13 +48,14 @@ class CLIPSelf:
                 teacher_crop_features = dist_model.encode_image(image_crops, normalize=False)
             student_dense_features = model.encode_dense(images, normalize=False, keep_shape=True)
 
-            normed_student_features = F.normalize(student_dense_features, dim=-1)
+            normed_student_features = F.normalize(student_dense_features, dim=1)
             normed_teacher_features = F.normalize(teacher_crop_features, dim=-1)
 
             denormed_boxes = self._denormalize_boxes(rois_list, student_dense_features)
 
             contrastive_loss = self.infonce(normed_student_features, normed_teacher_features, denormed_boxes)
             losses = dict(contrastive_loss=contrastive_loss)
+
         elif args.use_inter_loss:
             image_crops = torch.cat(crops_list)
             
@@ -126,10 +133,13 @@ class CLIPSelf:
                 # shape of sim_matrix: [num of patches per box, num of patches per box + 1]
                 sim_matrix = torch.matmul(box_dense_features, box_dense_features.T).fill_diagonal_(0)[1:,:]
 
-                '''
-                    8 JAN 24: reduce an impact of negative samples
-                '''  
-                sim_matrix[:,1:] *= 0.1
+                sim_dic = {
+                    "positive sim": sim_matrix[0][0],
+                    "hard neg sim": sim_matrix[0][2],
+                    "easy neg sim": sim_matrix[0][-1]
+                }
+                wandb.log(sim_dic, step=self.temp_iter)
+                self.temp_iter += 1
 
                 label = torch.zeros(sim_matrix.shape[0], dtype=torch.long, device=sim_matrix.device)
 
