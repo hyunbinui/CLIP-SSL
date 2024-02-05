@@ -136,12 +136,16 @@ class CLIPSelf:
         #     intra_batch_patch_dense_features = []
         # if 'intra_batch_cls' in args.neg_type:
         #     intra_batch_grid_cls_feature = []
+        if self.intra_batch:
+            intra_batch_patch_dense_features = []
+            pos_sims_batch = []
+            
 
         # for all images in a batch
         for i in range(len(denormed_boxes)):
             boxes_single_image = denormed_boxes[i].round().int()
 
-            if self.inter_grid:
+            if self.inter_grid or self.intra_batch:
                 inter_grid_patch_dense_features = []
                 num_patch_per_image_grid = []
                 inter_grid_cls_features = []
@@ -163,7 +167,7 @@ class CLIPSelf:
                 pos_sim = torch.matmul(box_dense_features, crop_feature.T)
                 pos_sims.append(pos_sim)
                 
-                if self.inter_grid:
+                if self.inter_grid or self.intra_batch:
                     num_patch_per_image_grid.append(box_dense_features.shape[0])
                     inter_grid_patch_dense_features.append(box_dense_features)
                     if self.inter_grid_cls:
@@ -190,12 +194,19 @@ class CLIPSelf:
                     loss.append(F.cross_entropy(sim_matrix*temperature, label, reduction=reduction))
                 
                 crop_idx += 1
+                
+            if self.intra_batch:
+                inter_grid_patch_dense_features = torch.cat(inter_grid_patch_dense_features, axis=0)
+                sim_matrix = torch.cat(pos_sims, axis=0)
+                intra_batch_patch_dense_features.append(inter_grid_patch_dense_features)
+                pos_sims_batch.append(sim_matrix)
 
             if self.inter_grid:
-                inter_grid_patch_dense_features = torch.cat(inter_grid_patch_dense_features, axis=0)
-                # print(f'all patch dense feature shape: {inter_grid_patch_dense_features.shape}')
-
-                sim_matrix = torch.cat(pos_sims, axis=0)
+                if self.intra_batch is False:
+                    inter_grid_patch_dense_features = torch.cat(inter_grid_patch_dense_features, axis=0)
+                    # print(f'all patch dense feature shape: {inter_grid_patch_dense_features.shape}')
+                    sim_matrix = torch.cat(pos_sims, axis=0)
+                
                 if self.inter_grid_patch:
                     neg_sim = torch.matmul(inter_grid_patch_dense_features, inter_grid_patch_dense_features.T)
                     start, end = 0, 0
@@ -232,7 +243,17 @@ class CLIPSelf:
                         "easy neg sim": sim_matrix[target_patch][-1]
                     }
                 wandb.log(sim_dic, step=self.iter)
-                self.iter += 1
+                self.iter += 1            
+                
+        if self.intra_batch:
+            assert len(intra_batch_patch_dense_features) == 2, f'only batch size 2 available when using intra_batch option'
+            dense_features_1, dense_features_2 = intra_batch_patch_dense_features
+            pos_sim_1, pos_sim_2 = pos_sims_batch
+            neg_sim = torch.matmul(dense_features_1, dense_features_2.T)
+            sim_matrix_1, sim_matrix_2 = torch.cat([pos_sim_1, neg_sim], axis=1), torch.cat([pos_sim_2, neg_sim.T], axis=1)
+            label_1, label_2 = torch.zeros(sim_matrix_1.shape[0], dtype=torch.long, device=sim_matrix.device), torch.zeros(sim_matrix_2.shape[0], dtype=torch.long, device=sim_matrix.device)
+            
+            loss += [F.cross_entropy(sim_matrix_1*temperature, label_1, reduction=reduction), F.cross_entropy(sim_matrix_2*temperature, label_2, reduction=reduction)]
 
         return sum(loss) / len(loss)
     
