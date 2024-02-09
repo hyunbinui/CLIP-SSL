@@ -148,10 +148,11 @@ def main(args):
         det_image_size=args.det_image_size,
         dataset_type=args.dataset_type,
     )
+    # if args.pretrained == 'openai_clip':
+    #     args.input_size = 224
+    # else:
+    #     args.input_size = model.visual.image_size
     args.input_size = model.visual.image_size
-    '''
-        24 JAN, 24 Add neg type
-    '''
     if args.dataset_type in ['grid_distill', 'proposals_distill']:
         method = CLIPSelf(args)
         if args.use_contrastive_loss:
@@ -176,12 +177,20 @@ def main(args):
 
     random_seed(args.seed, args.rank)
 
+    # if args.lock_image and not args.pretrained == 'openai_clip':
+    #     # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
+    #     model.lock_image_tower(
+    #         unlocked_groups=args.lock_image_unlocked_groups,
+    #         freeze_bn_stats=args.lock_image_freeze_bn_stats,
+    #     )
+
     if args.lock_image:
         # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
         model.lock_image_tower(
             unlocked_groups=args.lock_image_unlocked_groups,
             freeze_bn_stats=args.lock_image_freeze_bn_stats,
         )
+
     if args.grad_checkpointing:
         model.set_grad_checkpointing()
 
@@ -310,7 +319,7 @@ def main(args):
         evaluate(model, data, start_epoch, args)
         return
     evaluate(model, data, start_epoch, args)
-
+    
     loss = None
     
     wandb.watch(model)
