@@ -10,6 +10,8 @@ from .zero_shot import zero_shot_eval
 from .precision import get_autocast
 import os
 
+import wandb
+
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -158,8 +160,10 @@ def train_one_epoch(model, method, data, loss, epoch, optimizer, scaler, schedul
                 "samples_per_second_per_gpu": samples_per_second_per_gpu,
                 "scale": logit_scale_scalar,
                 "lr": optimizer.param_groups[0]["lr"]
-            }            
+            }       
             log_data.update({name:val.val for name,val in losses_m.items()})
+
+            wandb.log({'loss': total_loss}, step=step)
             # resetting batch / data time meters per log window
             batch_time_m.reset()
             data_time_m.reset()
@@ -193,6 +197,8 @@ def evaluate(model, data, epoch, args):
     )
     # TODO save the results as plots
     logging.info(metrics)
+
+    wandb.log(metrics, step=epoch)
 
     if args.save_logs:
         with open(os.path.join(args.checkpoint_path, "results.json"), "a+") as f:

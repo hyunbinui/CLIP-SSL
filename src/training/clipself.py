@@ -3,6 +3,9 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
+
+import wandb
 
 '''
     31 JAN 24: add deep infomax - localDIM
@@ -77,7 +80,7 @@ class CLIPSelf:
                 teacher_crop_features = dist_model.encode_image(image_crops, normalize=False)
             student_dense_features = model.encode_dense(images, normalize=False, keep_shape=True)
 
-            normed_student_features = F.normalize(student_dense_features, dim=-1)
+            normed_student_features = F.normalize(student_dense_features, dim=1)
             normed_teacher_features = F.normalize(teacher_crop_features, dim=-1)
             denormed_boxes = self._denormalize_boxes(rois_list, student_dense_features)
                 
@@ -105,7 +108,7 @@ class CLIPSelf:
 
             denormed_boxes = self._denormalize_boxes(rois_list, student_dense_features)
 
-            loss_inter = self.loss_inter_features_weighted(denormed_boxes, student_dense_features) if args.use_weighted_loss else self.loss_inter_features(denormed_boxes, student_dense_features)
+            loss_inter = self.loss_inter_features(denormed_boxes, student_dense_features)
 
             losses = dict(loss_cosine=loss_cosine*args.cosine_weight, loss_inter=loss_inter * 0.1)
 
@@ -239,15 +242,32 @@ class CLIPSelf:
         crop_idx = 0
         loss = []
 
+        # if 'intra_batch_patch' in args.neg_type:
+        #     intra_batch_patch_dense_features = []
+        # if 'intra_batch_cls' in args.neg_type:
+        #     intra_batch_grid_cls_feature = []
+        if self.intra_batch:
+            intra_batch_patch_dense_features = []
+            pos_sims_batch = []
+            
+
         # for all images in a batch
         for i in range(len(denormed_boxes)):
             boxes_single_image = denormed_boxes[i].round().int()
+
+            if self.inter_grid or self.intra_batch:
+                inter_grid_patch_dense_features = []
+                num_patch_per_image_grid = []
+                inter_grid_cls_features = []
+                pos_sims = []
    
             # for all boxes in an image
             for j in range(len(boxes_single_image)):
                 box = boxes_single_image[j]
+
+                # print(f'box values: {box}, crop_feature: {crop_features.shape}')
+
                 crop_feature = crop_features[crop_idx][None, ...]
-                crop_idx += 1
                 
                 box_dense_features = dense_features[i, :, box[0]:box[2], box[1]:box[3]]
                 # shape of box_dense_features: [num of patches per box, dim]
@@ -262,14 +282,59 @@ class CLIPSelf:
                 sim_matrix = torch.matmul(box_dense_features, box_dense_features.T).fill_diagonal_(0)[1:,:]
                 print("The shape of sim_matrix :", sim_matrix)
 
-                '''
-                    8 JAN 24: reduce an impact of negative samples
-                '''  
-                sim_matrix[:,1:] *= 0.1
+            if self.inter_grid:
+                if self.intra_batch is False:
+                    inter_grid_patch_dense_features = torch.cat(inter_grid_patch_dense_features, axis=0)
+                    # print(f'all patch dense feature shape: {inter_grid_patch_dense_features.shape}')
+                    sim_matrix = torch.cat(pos_sims, axis=0)
+                
+                if self.inter_grid_patch:
+                    neg_sim = torch.matmul(inter_grid_patch_dense_features, inter_grid_patch_dense_features.T)
+                    start, end = 0, 0
+                    for num_patch_per_grid in num_patch_per_image_grid:
+                        end += num_patch_per_grid
+                        # set similarity within same grid to 0 (features in same grid are not negative sample each other)
+                        neg_sim[start:end, start:end] = float('-inf')
+                        start = end
+                    sim_matrix = torch.cat([sim_matrix, neg_sim], axis=1)
+                if self.inter_grid_cls:
+                    inter_grid_cls_features = torch.cat(inter_grid_cls_features, axis=0)
+                    neg_sim = torch.matmul(inter_grid_patch_dense_features, inter_grid_cls_features.T)
+                    start, end = 0, 0
+                    # print(f'num_patch_per_image_grid: {len(num_patch_per_image_grid)}, inter_grid_cls_features: {inter_grid_cls_features.shape}, neg_sim shape: {neg_sim.shape}')
+                    for grid_idx, num_patch_per_grid in enumerate(num_patch_per_image_grid):
+                        end += num_patch_per_grid
+                        # set similarity with its own grid to 0 (positive similarity is calculated separately)
+                        neg_sim[start:end, grid_idx] = float('-inf')
+                        start = end
+                    sim_matrix = torch.cat([sim_matrix, neg_sim], axis=1)
+
+                self.num_samples = sim_matrix.shape[0]
+                self.num_pos_samples = num_patch_per_image_grid
 
                 label = torch.zeros(sim_matrix.shape[0], dtype=torch.long, device=sim_matrix.device)
 
-                loss.append(F.cross_entropy(sim_matrix/temperature, label, reduction=reduction))
+                loss.append(F.cross_entropy(sim_matrix*temperature, label, reduction=reduction))
+
+            if self.iter % 5000:
+                target_patch = num_patch_per_image_grid[0]
+                sim_dic = {
+                        "positive sim": sim_matrix[target_patch][0],
+                        "hard neg sim": sim_matrix[target_patch][target_patch+1],
+                        "easy neg sim": sim_matrix[target_patch][-1]
+                    }
+                wandb.log(sim_dic, step=self.iter)
+                self.iter += 1            
+                
+        if self.intra_batch:
+            assert len(intra_batch_patch_dense_features) == 2, f'only batch size 2 available when using intra_batch option'
+            dense_features_1, dense_features_2 = intra_batch_patch_dense_features
+            pos_sim_1, pos_sim_2 = pos_sims_batch
+            neg_sim = torch.matmul(dense_features_1, dense_features_2.T)
+            sim_matrix_1, sim_matrix_2 = torch.cat([pos_sim_1, neg_sim], axis=1), torch.cat([pos_sim_2, neg_sim.T], axis=1)
+            label_1, label_2 = torch.zeros(sim_matrix_1.shape[0], dtype=torch.long, device=sim_matrix.device), torch.zeros(sim_matrix_2.shape[0], dtype=torch.long, device=sim_matrix.device)
+            
+            loss += [F.cross_entropy(sim_matrix_1*temperature, label_1, reduction=reduction), F.cross_entropy(sim_matrix_2*temperature, label_2, reduction=reduction)]
 
         return sum(loss) / len(loss)
     
@@ -290,25 +355,6 @@ class CLIPSelf:
                 cropped_features = cropped_features.reshape(cropped_features.shape[0], -1).transpose(0, 1)
                 dot_matrix = torch.matmul(cropped_features, cropped_features.T).fill_diagonal_(0) #.sum() / 2
                 result += torch.mean(dot_matrix)
-                count += 1
-
-        return 1-(result / count)
-
-    def loss_inter_features_weighted(self, denormed_boxes, dense_features):
-        result = 0
-        count = 0
-        
-        for i in range(len(denormed_boxes)):
-            boxes_single_image = denormed_boxes[i].round().int()
-            for j in range(len(boxes_single_image)):
-                box = boxes_single_image[j]
-                
-                cropped_features = dense_features[i, :, box[0]:box[2], box[1]:box[3]]
-                cropped_features = cropped_features.reshape(cropped_features.shape[0], -1).transpose(0, 1)
-                
-                dot_matrix = torch.matmul(cropped_features, cropped_features.T)
-                weighted_dot_matrix = F.softmax(dot_matrix.clone().fill_diagonal_(-float("Inf")), dim=1) * dot_matrix
-                result += torch.sum(weighted_dot_matrix) / cropped_features.shape[0]
                 count += 1
 
         return 1-(result / count)

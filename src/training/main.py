@@ -21,6 +21,9 @@ from training.scheduler import cosine_lr, const_lr, const_lr_cooldown
 from training.train import train_one_epoch, evaluate, student_teacher_ensemble
 from training.file_utils import pt_load
 
+import wandb
+from training.dbLog import set_db
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 os.environ['TORCH_USE_CUDA_DSA'] = "1"
 
@@ -57,6 +60,13 @@ def get_latest_checkpoint(path: str, remote : bool):
 
 def main(args):
     args = parse_args(args)
+
+    '''
+        15 JAN, 2024
+        Setting DB to watch logs(loss)
+    '''
+    set_db(args)
+
 
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
@@ -143,9 +153,10 @@ def main(args):
     # else:
     #     args.input_size = model.visual.image_size
     args.input_size = model.visual.image_size
-
     if args.dataset_type in ['grid_distill', 'proposals_distill']:
-        method = CLIPSelf()
+        method = CLIPSelf(args)
+        if args.use_contrastive_loss:
+            method.neg_type = args.neg_type
     elif args.dataset_type == 'region_clip':
         method = RegionCLIP(args=args).to(device)
     else:
@@ -203,17 +214,41 @@ def main(args):
         include = lambda n, p: not exclude(n, p)
 
         named_parameters = list(model.named_parameters())
+        
+        '''
+            10 JAN, 2023
+            use fixed temperature
+        '''
+        if not args.set_temp_trainable:
+            for n, p in named_parameters:
+                if 'logit_scale' in n:
+                    p.requires_grad = False
+                
         gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
         rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
-        optimizer = optim.AdamW(
-            [
-                {"params": gain_or_bias_params, "weight_decay": 0.},
-                {"params": rest_params, "weight_decay": args.wd},
-            ],
-            lr=args.lr,
-            betas=(args.beta1, args.beta2),
-            eps=args.eps,
-        )
+        
+        # print(f'exclude: {gain_or_bias_params}')
+        # print(f'include: {rest_params}')
+        
+        if args.optim_type == 'AdamW':
+            optimizer = optim.AdamW(
+                [
+                    {"params": gain_or_bias_params, "weight_decay": 0.},
+                    {"params": rest_params, "weight_decay": args.wd},
+                ],
+                lr=args.lr,
+                betas=(args.beta1, args.beta2),
+                eps=args.eps,
+            )
+        elif args.optim_type == 'SGD':
+            optimizer = optim.SGD(
+                [
+                    {"params": gain_or_bias_params, "weight_decay": 0.},
+                    {"params": rest_params, "weight_decay": args.wd},
+                ],
+                lr=args.lr
+            )
+
         scaler = GradScaler() if args.precision == "amp" else None
 
     # optionally resume from a checkpoint
@@ -286,10 +321,20 @@ def main(args):
     #evaluate(model, data, start_epoch, args)
     
     loss = None
+    
+    wandb.watch(model)
 
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
+
+        '''
+            21 JAN, 2024
+            log epoch to CLIPSelf class
+        '''
+        if isinstance(method, CLIPSelf):
+            method.epoch = epoch
+
         train_one_epoch(model, method, data, loss, epoch, optimizer, scaler,
                         scheduler, dist_model, args)
         completed_epoch = epoch + 1
