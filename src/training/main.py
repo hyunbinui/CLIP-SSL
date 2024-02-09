@@ -253,25 +253,25 @@ def main(args):
 
     # optionally resume from a checkpoint
     start_epoch = 0
-    if args.resume is not None:
-        checkpoint = pt_load(args.resume, map_location='cpu')
-        if 'epoch' in checkpoint:
-            # resuming a train checkpoint w/ epoch and optimizer state
-            start_epoch = checkpoint["epoch"]
-            sd = checkpoint["state_dict"]
-            if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
-                    sd = {k[len('module.'):]: v for k, v in sd.items()}
+    # if args.resume is not None:
+    #     checkpoint = pt_load(args.resume, map_location='cpu')
+    #     if 'epoch' in checkpoint:
+    #         # resuming a train checkpoint w/ epoch and optimizer state
+    #         start_epoch = checkpoint["epoch"]
+    #         sd = checkpoint["state_dict"]
+    #         if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
+    #                 sd = {k[len('module.'):]: v for k, v in sd.items()}
 
-            model.load_state_dict(sd)
-            if optimizer is not None:
-                optimizer.load_state_dict(checkpoint["optimizer"])
-            if scaler is not None and 'scaler' in checkpoint:
-                scaler.load_state_dict(checkpoint['scaler'])
-            logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
-        else:
-            # loading a bare (model only) checkpoint for fine-tune or evaluation
-            model.load_state_dict(checkpoint)
-            logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
+    #         model.load_state_dict(sd)
+    #         if optimizer is not None:
+    #             optimizer.load_state_dict(checkpoint["optimizer"])
+    #         if scaler is not None and 'scaler' in checkpoint:
+    #             scaler.load_state_dict(checkpoint['scaler'])
+    #         logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
+    #     else:
+    #         # loading a bare (model only) checkpoint for fine-tune or evaluation
+    #         model.load_state_dict(checkpoint)
+    #         logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
 
     if args.distributed:
         if args.use_bn_sync:
