@@ -27,9 +27,26 @@ class LocalDim(nn.Module):
         return x.T
 
 class CLIPSelf:
-    # def __init__(self):
-    #     super.__init__()
-    #     self.local_dim = LocalDim()
+    def __init__(self, args=None):
+        self.iter = 0
+        self.epoch = 0
+        self.num_samples = 0
+        self.num_pos_samples = 0
+        #self.local_dim = LocalDim()
+        if args.use_contrastive_loss:
+            self.intra_grid_patch = 'intra_grid_patch' in args.neg_type
+            self.inter_grid = 'inter_grid_patch' in args.neg_type or 'inter_grid_cls' in args.neg_type
+            self.inter_grid_patch = 'inter_grid_patch' in args.neg_type
+            self.inter_grid_cls = 'inter_grid_cls' in args.neg_type
+            self.intra_batch = 'intra_batch_patch' in args.neg_type or 'intra_batch_cls' in args.neg_type
+            self.intra_batch_patch = 'intra_batch_patch' in args.neg_type
+            self.intra_batch_cls = 'intra_batch_cls' in args.neg_type
+
+    def print_num_samples(self):
+        print('------------------------------------------------------------------------------------------------------------------------')
+        print(f'num_samples: {self.num_samples},    num_neg_samples: {[self.num_samples - num_pos for num_pos in self.num_pos_samples]}')
+        print(f'neg type: inter_grid {self.inter_grid}, intra_grid_patch {self.inter_grid_patch}, inter_grid_patch {self.inter_grid_patch}, inter_grid_cls {self.inter_grid_cls}')
+        print('------------------------------------------------------------------------------------------------------------------------')
 
     def __call__(self, batch, model, dist_model, loss, device, cast_dtype, distributed, args):
         if distributed:
@@ -84,7 +101,8 @@ class CLIPSelf:
             normed_teacher_features = F.normalize(teacher_crop_features, dim=-1)
             denormed_boxes = self._denormalize_boxes(rois_list, student_dense_features)
                 
-            contrastive_loss = self.infonce(normed_student_features, normed_teacher_features, denormed_boxes)
+            # contrastive_loss = self.infonce(args, normed_student_features, normed_teacher_features, denormed_boxes, temperature=model.logit_scale.exp())
+            contrastive_loss = self.infonce(args, normed_student_features, normed_teacher_features, denormed_boxes)
             losses = dict(contrastive_loss=contrastive_loss)
 
         elif args.use_inter_loss:
@@ -238,7 +256,7 @@ class CLIPSelf:
 
         return sum(loss) / len(loss)
 
-    def infonce(self, dense_features, crop_features, denormed_boxes, temperature=1., reduction='mean'):
+    def infonce(self, args, dense_features, crop_features, denormed_boxes, temperature=1., reduction='mean'):
         crop_idx = 0
         loss = []
 
@@ -272,15 +290,44 @@ class CLIPSelf:
                 box_dense_features = dense_features[i, :, box[0]:box[2], box[1]:box[3]]
                 # shape of box_dense_features: [num of patches per box, dim]
                 box_dense_features = box_dense_features.reshape(box_dense_features.shape[0], -1).transpose(0, 1)
-                print("The shape of cls toekn :", crop_feature.shape)
-                print("The shape of box_dense_features before concat cls toekn :", box_dense_features.shape)
 
-                # concat CLS token of the box
-                box_dense_features = torch.cat([crop_feature, box_dense_features], dim=0)
-                print("The shape of box_dense_features after concat cls toekn :", box_dense_features.shape)
-                # shape of sim_matrix: [num of patches per box, num of patches per box + 1]
-                sim_matrix = torch.matmul(box_dense_features, box_dense_features.T).fill_diagonal_(0)[1:,:]
-                print("The shape of sim_matrix :", sim_matrix)
+                # shape of pos_sim: [num of patches per box, 1]
+                pos_sim = torch.matmul(box_dense_features, crop_feature.T)
+                pos_sims.append(pos_sim)
+                
+                if self.inter_grid or self.intra_batch:
+                    num_patch_per_image_grid.append(box_dense_features.shape[0])
+                    inter_grid_patch_dense_features.append(box_dense_features)
+                    if self.inter_grid_cls:
+                        inter_grid_cls_features.append(crop_feature)
+                elif self.intra_grid_patch:
+                    # shape of sim_matrix: [num of patches per box, num of patches per box + 1]
+                    neg_sim = torch.matmul(box_dense_features, box_dense_features.T).fill_diagonal_(0)
+                    sim_matrix = torch.cat([pos_sim, neg_sim], axis=1)
+
+                    '''
+                        21 JAN, 2024
+                        use subset of negative sample sorted by similarity with target patch embedding
+                    '''
+                    if args.start_neg_ratio != 1.:
+                        assert 0 < args.start_neg_ratio < 1, f'start_neg_ratio is not a value between 0 and 1: {args.start_neg_ratio}'
+                        sorted_sim_matrix, _ = torch.sort(sim_matrix[:,1:], dim=-1)
+                        # start from 0.5 and increase by 0.1 at every epoch to 1.
+                        neg_ratio = min(1, (args.start_neg_ratio + self.epoch * 0.1))
+                        neg_samples = int(sorted_sim_matrix.shape[-1] * neg_ratio)
+                        sim_matrix = torch.concat([sim_matrix[:,0:1], sorted_sim_matrix[:,:neg_samples]], axis=-1)
+
+                    label = torch.zeros(sim_matrix.shape[0], dtype=torch.long, device=sim_matrix.device)
+
+                    loss.append(F.cross_entropy(sim_matrix*temperature, label, reduction=reduction))
+                
+                crop_idx += 1
+                
+            if self.intra_batch:
+                inter_grid_patch_dense_features = torch.cat(inter_grid_patch_dense_features, axis=0)
+                sim_matrix = torch.cat(pos_sims, axis=0)
+                intra_batch_patch_dense_features.append(inter_grid_patch_dense_features)
+                pos_sims_batch.append(sim_matrix)
 
             if self.inter_grid:
                 if self.intra_batch is False:
