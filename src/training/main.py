@@ -21,6 +21,9 @@ from training.scheduler import cosine_lr, const_lr, const_lr_cooldown
 from training.train import train_one_epoch, evaluate, student_teacher_ensemble
 from training.file_utils import pt_load
 
+import wandb
+from training.dbLog import set_db
+
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 os.environ['TORCH_USE_CUDA_DSA'] = "1"
 
@@ -57,6 +60,13 @@ def get_latest_checkpoint(path: str, remote : bool):
 
 def main(args):
     args = parse_args(args)
+
+    '''
+        15 JAN, 2024
+        Setting DB to watch logs(loss)
+    '''
+    set_db(args)
+
 
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
@@ -138,9 +148,15 @@ def main(args):
         det_image_size=args.det_image_size,
         dataset_type=args.dataset_type,
     )
+    # if args.pretrained == 'openai_clip':
+    #     args.input_size = 224
+    # else:
+    #     args.input_size = model.visual.image_size
     args.input_size = model.visual.image_size
     if args.dataset_type in ['grid_distill', 'proposals_distill']:
-        method = CLIPSelf()
+        method = CLIPSelf(args)
+        if args.use_contrastive_loss:
+            method.neg_type = args.neg_type
     elif args.dataset_type == 'region_clip':
         method = RegionCLIP(args=args).to(device)
     else:
@@ -161,12 +177,20 @@ def main(args):
 
     random_seed(args.seed, args.rank)
 
+    # if args.lock_image and not args.pretrained == 'openai_clip':
+    #     # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
+    #     model.lock_image_tower(
+    #         unlocked_groups=args.lock_image_unlocked_groups,
+    #         freeze_bn_stats=args.lock_image_freeze_bn_stats,
+    #     )
+
     if args.lock_image:
         # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
         model.lock_image_tower(
             unlocked_groups=args.lock_image_unlocked_groups,
             freeze_bn_stats=args.lock_image_freeze_bn_stats,
         )
+
     if args.grad_checkpointing:
         model.set_grad_checkpointing()
 
@@ -190,40 +214,64 @@ def main(args):
         include = lambda n, p: not exclude(n, p)
 
         named_parameters = list(model.named_parameters())
+        
+        '''
+            10 JAN, 2023
+            use fixed temperature
+        '''
+        if not args.set_temp_trainable:
+            for n, p in named_parameters:
+                if 'logit_scale' in n:
+                    p.requires_grad = False
+                
         gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
         rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
-        optimizer = optim.AdamW(
-            [
-                {"params": gain_or_bias_params, "weight_decay": 0.},
-                {"params": rest_params, "weight_decay": args.wd},
-            ],
-            lr=args.lr,
-            betas=(args.beta1, args.beta2),
-            eps=args.eps,
-        )
+        
+        # print(f'exclude: {gain_or_bias_params}')
+        # print(f'include: {rest_params}')
+        
+        if args.optim_type == 'AdamW':
+            optimizer = optim.AdamW(
+                [
+                    {"params": gain_or_bias_params, "weight_decay": 0.},
+                    {"params": rest_params, "weight_decay": args.wd},
+                ],
+                lr=args.lr,
+                betas=(args.beta1, args.beta2),
+                eps=args.eps,
+            )
+        elif args.optim_type == 'SGD':
+            optimizer = optim.SGD(
+                [
+                    {"params": gain_or_bias_params, "weight_decay": 0.},
+                    {"params": rest_params, "weight_decay": args.wd},
+                ],
+                lr=args.lr
+            )
+
         scaler = GradScaler() if args.precision == "amp" else None
 
     # optionally resume from a checkpoint
     start_epoch = 0
-    if args.resume is not None:
-        checkpoint = pt_load(args.resume, map_location='cpu')
-        if 'epoch' in checkpoint:
-            # resuming a train checkpoint w/ epoch and optimizer state
-            start_epoch = checkpoint["epoch"]
-            sd = checkpoint["state_dict"]
-            if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
-                    sd = {k[len('module.'):]: v for k, v in sd.items()}
+    # if args.resume is not None:
+    #     checkpoint = pt_load(args.resume, map_location='cpu')
+    #     if 'epoch' in checkpoint:
+    #         # resuming a train checkpoint w/ epoch and optimizer state
+    #         start_epoch = checkpoint["epoch"]
+    #         sd = checkpoint["state_dict"]
+    #         if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
+    #                 sd = {k[len('module.'):]: v for k, v in sd.items()}
 
-            model.load_state_dict(sd)
-            if optimizer is not None:
-                optimizer.load_state_dict(checkpoint["optimizer"])
-            if scaler is not None and 'scaler' in checkpoint:
-                scaler.load_state_dict(checkpoint['scaler'])
-            logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
-        else:
-            # loading a bare (model only) checkpoint for fine-tune or evaluation
-            model.load_state_dict(checkpoint)
-            logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
+    #         model.load_state_dict(sd)
+    #         if optimizer is not None:
+    #             optimizer.load_state_dict(checkpoint["optimizer"])
+    #         if scaler is not None and 'scaler' in checkpoint:
+    #             scaler.load_state_dict(checkpoint['scaler'])
+    #         logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
+    #     else:
+    #         # loading a bare (model only) checkpoint for fine-tune or evaluation
+    #         model.load_state_dict(checkpoint)
+    #         logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
 
     if args.distributed:
         if args.use_bn_sync:
@@ -270,13 +318,23 @@ def main(args):
         del dist_model
         evaluate(model, data, start_epoch, args)
         return
-    evaluate(model, data, start_epoch, args)
-
+    #evaluate(model, data, start_epoch, args)
+    
     loss = None
+    
+    wandb.watch(model)
 
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
+
+        '''
+            21 JAN, 2024
+            log epoch to CLIPSelf class
+        '''
+        if isinstance(method, CLIPSelf):
+            method.epoch = epoch
+
         train_one_epoch(model, method, data, loss, epoch, optimizer, scaler,
                         scheduler, dist_model, args)
         completed_epoch = epoch + 1

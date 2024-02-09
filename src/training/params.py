@@ -466,6 +466,30 @@ def parse_args(args):
     )
 
     '''
+        7 FEB 24: add multi grid training method
+    '''
+    parser.add_argument(
+        "--multi-grid-train",
+        action="store_true",
+        default=False,
+    )
+
+    '''
+        28 JAN 24: add deep infomax contrastive loss
+    '''
+    parser.add_argument(
+        "--infomax-alpha",
+        type=float,
+        default=0.2,
+    )
+
+    parser.add_argument(
+        "--use-local-infomax-loss",
+        action="store_true",
+        default=False,
+    )
+
+    '''
         3 JAN 24: add contrastive loss
     '''
     parser.add_argument(
@@ -484,9 +508,33 @@ def parse_args(args):
     )
     
     parser.add_argument(
-        "--use-weighted-loss",
+        "--set-temp-trainable",
         action="store_true",
         default=False,
+    )
+
+    parser.add_argument(
+        "--start-neg-ratio",
+        type=float,
+        default=1.,
+    )
+
+    '''
+        24 JAN, 24 Add neg type
+    '''
+    parser.add_argument(
+        "--neg-type",
+        nargs='+',
+        type=str,
+        default=['intra_grid_patch'],
+        choices=['intra_grid_patch', 'inter_grid_patch', 'inter_grid_cls', 'intra_batch_patch', 'intra_batch_cls', 'inter_batch']
+    )
+
+    parser.add_argument(
+        "--optim-type",
+        type=str,
+        default='AdamW',
+        choices=['AdamW', 'SGD']
     )
 
     args = parser.parse_args(args)
