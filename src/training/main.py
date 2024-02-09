@@ -138,7 +138,12 @@ def main(args):
         det_image_size=args.det_image_size,
         dataset_type=args.dataset_type,
     )
+    # if args.pretrained == 'openai_clip':
+    #     args.input_size = 224
+    # else:
+    #     args.input_size = model.visual.image_size
     args.input_size = model.visual.image_size
+
     if args.dataset_type in ['grid_distill', 'proposals_distill']:
         method = CLIPSelf()
     elif args.dataset_type == 'region_clip':
@@ -161,12 +166,20 @@ def main(args):
 
     random_seed(args.seed, args.rank)
 
+    # if args.lock_image and not args.pretrained == 'openai_clip':
+    #     # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
+    #     model.lock_image_tower(
+    #         unlocked_groups=args.lock_image_unlocked_groups,
+    #         freeze_bn_stats=args.lock_image_freeze_bn_stats,
+    #     )
+
     if args.lock_image:
         # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
         model.lock_image_tower(
             unlocked_groups=args.lock_image_unlocked_groups,
             freeze_bn_stats=args.lock_image_freeze_bn_stats,
         )
+
     if args.grad_checkpointing:
         model.set_grad_checkpointing()
 
@@ -205,25 +218,25 @@ def main(args):
 
     # optionally resume from a checkpoint
     start_epoch = 0
-    if args.resume is not None:
-        checkpoint = pt_load(args.resume, map_location='cpu')
-        if 'epoch' in checkpoint:
-            # resuming a train checkpoint w/ epoch and optimizer state
-            start_epoch = checkpoint["epoch"]
-            sd = checkpoint["state_dict"]
-            if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
-                    sd = {k[len('module.'):]: v for k, v in sd.items()}
+    # if args.resume is not None:
+    #     checkpoint = pt_load(args.resume, map_location='cpu')
+    #     if 'epoch' in checkpoint:
+    #         # resuming a train checkpoint w/ epoch and optimizer state
+    #         start_epoch = checkpoint["epoch"]
+    #         sd = checkpoint["state_dict"]
+    #         if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
+    #                 sd = {k[len('module.'):]: v for k, v in sd.items()}
 
-            model.load_state_dict(sd)
-            if optimizer is not None:
-                optimizer.load_state_dict(checkpoint["optimizer"])
-            if scaler is not None and 'scaler' in checkpoint:
-                scaler.load_state_dict(checkpoint['scaler'])
-            logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
-        else:
-            # loading a bare (model only) checkpoint for fine-tune or evaluation
-            model.load_state_dict(checkpoint)
-            logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
+    #         model.load_state_dict(sd)
+    #         if optimizer is not None:
+    #             optimizer.load_state_dict(checkpoint["optimizer"])
+    #         if scaler is not None and 'scaler' in checkpoint:
+    #             scaler.load_state_dict(checkpoint['scaler'])
+    #         logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
+    #     else:
+    #         # loading a bare (model only) checkpoint for fine-tune or evaluation
+    #         model.load_state_dict(checkpoint)
+    #         logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
 
     if args.distributed:
         if args.use_bn_sync:
@@ -270,8 +283,8 @@ def main(args):
         del dist_model
         evaluate(model, data, start_epoch, args)
         return
-    evaluate(model, data, start_epoch, args)
-
+    #evaluate(model, data, start_epoch, args)
+    
     loss = None
 
     for epoch in range(start_epoch, args.epochs):
