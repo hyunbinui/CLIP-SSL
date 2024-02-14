@@ -11,6 +11,7 @@ class CLIPSelf:
         self.epoch = 0
         self.num_samples = 0
         self.num_pos_samples = 0
+        self.use_logit = args.use_logit
         if args.use_contrastive_loss:
             self.intra_grid_patch = 'intra_grid_patch' in args.neg_type
             self.inter_grid = 'inter_grid_patch' in args.neg_type or 'inter_grid_cls' in args.neg_type
@@ -70,8 +71,8 @@ class CLIPSelf:
 
             denormed_boxes = self._denormalize_boxes(rois_list, student_dense_features)
 
-            # contrastive_loss = self.infonce(args, normed_student_features, normed_teacher_features, denormed_boxes, temperature=model.logit_scale.exp())
-            contrastive_loss = self.infonce(args, normed_student_features, normed_teacher_features, denormed_boxes)
+            contrastive_loss = self.infonce(normed_student_features, normed_teacher_features, denormed_boxes, temperature=model.logit_scale.exp())
+            # contrastive_loss = self.infonce(normed_student_features, normed_teacher_features, denormed_boxes)
             losses = dict(contrastive_loss=contrastive_loss)
 
         elif args.use_inter_loss:
@@ -128,7 +129,8 @@ class CLIPSelf:
             denormed_boxes.append(new_boxes)
         return denormed_boxes
     
-    def infonce(self, args, dense_features, crop_features, denormed_boxes, temperature=1., reduction='mean'):
+    def infonce(self, dense_features, crop_features, denormed_boxes, temperature=1., reduction='mean'):
+        temperature = temperature if self.use_logit else 1.
         crop_idx = 0
         loss = []
 
@@ -181,13 +183,13 @@ class CLIPSelf:
                         21 JAN, 2024
                         use subset of negative sample sorted by similarity with target patch embedding
                     '''
-                    if args.start_neg_ratio != 1.:
-                        assert 0 < args.start_neg_ratio < 1, f'start_neg_ratio is not a value between 0 and 1: {args.start_neg_ratio}'
-                        sorted_sim_matrix, _ = torch.sort(sim_matrix[:,1:], dim=-1)
-                        # start from 0.5 and increase by 0.1 at every epoch to 1.
-                        neg_ratio = min(1, (args.start_neg_ratio + self.epoch * 0.1))
-                        neg_samples = int(sorted_sim_matrix.shape[-1] * neg_ratio)
-                        sim_matrix = torch.concat([sim_matrix[:,0:1], sorted_sim_matrix[:,:neg_samples]], axis=-1)
+                    # if args.start_neg_ratio != 1.:
+                    #     assert 0 < args.start_neg_ratio < 1, f'start_neg_ratio is not a value between 0 and 1: {args.start_neg_ratio}'
+                    #     sorted_sim_matrix, _ = torch.sort(sim_matrix[:,1:], dim=-1)
+                    #     # start from 0.5 and increase by 0.1 at every epoch to 1.
+                    #     neg_ratio = min(1, (args.start_neg_ratio + self.epoch * 0.1))
+                    #     neg_samples = int(sorted_sim_matrix.shape[-1] * neg_ratio)
+                    #     sim_matrix = torch.concat([sim_matrix[:,0:1], sorted_sim_matrix[:,:neg_samples]], axis=-1)
 
                     label = torch.zeros(sim_matrix.shape[0], dtype=torch.long, device=sim_matrix.device)
 

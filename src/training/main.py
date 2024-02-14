@@ -61,13 +61,6 @@ def get_latest_checkpoint(path: str, remote : bool):
 def main(args):
     args = parse_args(args)
 
-    '''
-        15 JAN, 2024
-        Setting DB to watch logs(loss)
-    '''
-    set_db(args)
-
-
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
         # float16 and almost as accurate as float32
@@ -210,16 +203,15 @@ def main(args):
             10 JAN, 2023
             use fixed temperature
         '''
-        if not args.set_temp_trainable:
-            for n, p in named_parameters:
-                if 'logit_scale' in n:
+        for n, p in named_parameters:
+            if 'logit_scale' in n:
+                p.data = torch.tensor(1., device=p.device, requires_grad=True)
+                if not args.set_temp_trainable:
                     p.requires_grad = False
-                
+                print(f'info about logit: {n}, {p}, {p.requires_grad}')
+            
         gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
         rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
-        
-        # print(f'exclude: {gain_or_bias_params}')
-        # print(f'include: {rest_params}')
         
         if args.optim_type == 'AdamW':
             optimizer = optim.AdamW(
@@ -260,8 +252,13 @@ def main(args):
                 scaler.load_state_dict(checkpoint['scaler'])
             logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
         else:
+            sd = checkpoint["state_dict"]
+            if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
+                    sd = {k[len('module.'):]: v for k, v in sd.items()}
+
+            model.load_state_dict(sd)
             # loading a bare (model only) checkpoint for fine-tune or evaluation
-            model.load_state_dict(checkpoint)
+            # model.load_state_dict(checkpoint)
             logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
 
     if args.distributed:
@@ -307,15 +304,21 @@ def main(args):
     os.makedirs(args.checkpoint_path, exist_ok=True)
     if 'train' not in data:
         del dist_model
+        start_epoch = 0
         evaluate(model, data, start_epoch, args)
         return
-    evaluate(model, data, start_epoch, args)
 
+    '''
+        15 JAN, 2024
+        Setting DB to watch logs(loss)
+    '''
+    set_db(args)
+    evaluate(model, data, start_epoch, args)
     loss = None
-    
-    wandb.watch(model)
 
     for epoch in range(start_epoch, args.epochs):
+        wandb.watch(model)
+
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
 
@@ -391,9 +394,9 @@ def main(args):
             test_model.load_state_dict(target_state_dict)
             if args.distributed:
                 test_model = torch.nn.parallel.DistributedDataParallel(test_model, device_ids=[device], **ddp_args)
-            evaluate(test_model, data, completed_epoch, args)
+            metrics = evaluate(test_model, data, completed_epoch, args)
+            wandb.log(metrics, step=epoch)
             del test_model
-
 
 if __name__ == "__main__":
     main(sys.argv[1:])

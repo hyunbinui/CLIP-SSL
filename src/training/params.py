@@ -513,6 +513,19 @@ def parse_args(args):
         choices=['AdamW', 'SGD']
     )
 
+    '''
+        5 Feb, 24 Add option of using logit
+    '''
+    parser.add_argument(
+        "--use-logit",
+        action="store_true",
+        default=False,
+    )
+
+    parser.add_argument(
+        "--miou-frequency", type=int, default=1, help="How often to run zero shot."
+    )
+
     args = parser.parse_args(args)
 
     # If some params are not passed, we use the default values based on model name.

@@ -12,7 +12,6 @@ import os
 
 import wandb
 
-
 class AverageMeter(object):
     """Computes and stores the average and current value"""
 
@@ -162,19 +161,14 @@ def train_one_epoch(model, method, data, loss, epoch, optimizer, scaler, schedul
                 "lr": optimizer.param_groups[0]["lr"]
             }       
             log_data.update({name:val.val for name,val in losses_m.items()})
-
+            
             wandb.log({'loss': total_loss}, step=step)
             # resetting batch / data time meters per log window
             batch_time_m.reset()
             data_time_m.reset()
-
-    # save trainig results at each epoch
-    # torch.save({
-    #         'epoch': epoch,
-    #         'optimizer_state_dict': optimizer.state_dict(),
-    #         'model_state_dict': model.state_dict(),
-    #         'scaler': scaler
-    #     }, f'{args.checkpoint_path}.{epoch:04d}.pth')
+    
+        # logging.info(f'batch shape: {batch[0].shape}')
+        # assert i < 2, f'exit program for testing'
 
 
 def evaluate(model, data, epoch, args):
@@ -196,9 +190,16 @@ def evaluate(model, data, epoch, args):
         + f"{keys}: {values}."
     )
     # TODO save the results as plots
-    logging.info(metrics)
-
-    wandb.log(metrics, step=epoch)
+    # logging.info(metrics)
+    logging.info("-----------------------------Evaluation---------------------------")
+    cnt = 0
+    for metric, score in metrics.items():
+        if cnt == 4:
+            logging.info(f'| {f" ":<64}|')
+            cnt = 0
+        logging.info(f'| {f"{metric}":<30} : {f"{score}":<30} |')
+        cnt += 1
+    logging.info("------------------------------------------------------------------")
 
     if args.save_logs:
         with open(os.path.join(args.checkpoint_path, "results.json"), "a+") as f:

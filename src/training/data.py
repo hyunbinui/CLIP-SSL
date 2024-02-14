@@ -125,7 +125,7 @@ class ProposalDistillDataset(Dataset):
 
         _, h, w = new_image.shape
 
-        boxes_template[:, :4] *= scale
+        boxes_template[:, :4] *= scale        
         boxes_template[:, [0, 2]] /= w
         boxes_template[:, [1, 3]] /= h
 
@@ -270,6 +270,7 @@ class GridDistillDataset(Dataset):
         _, h, w = new_image.shape
 
         boxes[:, :4] *= scale
+        
         boxes[:, [0, 2]] /= w
         boxes[:, [1, 3]] /= h
 
@@ -347,6 +348,9 @@ class COCOPanopticDataset(Dataset):
         image_crops = torch.zeros(self.max_anns, 3, *self.crop_size)
         gt_masks = torch.zeros(self.max_anns, self.segm_transform.max_size,
                                self.segm_transform.max_size)
+
+        gt_seg_mask = segm_map.copy()
+        
         masked_image_crops = torch.zeros(self.max_anns, 3, *self.crop_size)
 
         for i, ann in enumerate(anns):
@@ -379,6 +383,14 @@ class COCOPanopticDataset(Dataset):
             box_info = torch.tensor([x, y, x + w, y + h, cls_label, 1.0, w * h, is_thing])    # x, y, x + w, y + h
             boxes_template[i] = box_info
             gt_masks[i] = gt_mask[0]
+            '''
+                modify
+                기존 gt 이미지 크기 그대로
+            '''
+            ann_mask = (segm_map == ann['id'])
+            gt_seg_mask[ann_mask] = cls_label
+
+        gt_seg_mask = torch.from_numpy(gt_seg_mask)
 
         _, h, w = new_image.shape
 
@@ -386,7 +398,8 @@ class COCOPanopticDataset(Dataset):
         boxes_template[:, [0, 2]] /= w
         boxes_template[:, [1, 3]] /= h
 
-        return new_image, boxes_template, image_crops, gt_masks, masked_image_crops
+        # return new_image, boxes_template, image_crops, gt_mask, masked_image_crops
+        return new_image, boxes_template, image_crops, gt_masks, gt_seg_mask, masked_image_crops
 
 
 class COCORegionCLIPDataset(Dataset):
