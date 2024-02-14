@@ -466,6 +466,30 @@ def parse_args(args):
     )
 
     '''
+        7 FEB 24: add multi grid training method
+    '''
+    parser.add_argument(
+        "--multi-grid-train",
+        action="store_true",
+        default=False,
+    )
+
+    '''
+        28 JAN 24: add deep infomax contrastive loss
+    '''
+    parser.add_argument(
+        "--infomax-alpha",
+        type=float,
+        default=0.2,
+    )
+
+    parser.add_argument(
+        "--use-local-infomax-loss",
+        action="store_true",
+        default=False,
+    )
+
+    '''
         3 JAN 24: add contrastive loss
     '''
     parser.add_argument(

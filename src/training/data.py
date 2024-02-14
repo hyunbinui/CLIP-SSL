@@ -139,13 +139,13 @@ class GridDistillDataset(Dataset):
                  crop_size=224,
                  pre_transforms=False,
                  ceph_root="", args=None):
+        self.args = args
         self._init_choices(max_split)
         logging.debug(f'Loading coco caption style data from {input_filename}.')
         self.coco = COCO(input_filename)
         logging.debug('Done loading data.')
         self.transforms = transforms
         self.image_root = image_root
-        self.args = args
         image_ids = list(self.coco.imgs.keys())
         train_ratio = args.train_ratio
         if train_ratio < 1.0:
@@ -198,11 +198,14 @@ class GridDistillDataset(Dataset):
 
 
     def _init_choices(self, M=16):
-        choices = []
-        for m in range(1, M+1):
-            for n in range((m + 1)//2, min(m*2 + 1, M+1)):
-                choices.append((m, n))
-        self.choices = choices
+        if self.args.multi_grid_train:
+            self.choices=[(1,1),(2,2),(4,4)]
+        else:
+            choices = []
+            for m in range(1, M+1):
+                for n in range((m + 1)//2, min(m*2 + 1, M+1)):
+                    choices.append((m, n))
+            self.choices = choices
 
     def __len__(self):
         return len(self.image_ids)
@@ -262,22 +265,42 @@ class GridDistillDataset(Dataset):
         new_image = self.transforms[0](old_image)
 
         scale = get_scale(old_image, new_image)
-        boxes_template = torch.zeros(self.max_anns, 4 + 1)    # xyxy s
-        image_crops_template = torch.zeros(self.max_anns, 3, *self.crop_size)
-        image_crops, boxes = self._obtain_image_crops(old_image,
-                                                      random.choice(self.choices))
-        assert image_crops.shape[0] == boxes.shape[0]
-        _, h, w = new_image.shape
 
-        boxes[:, :4] *= scale
+        if self.args.multi_grid_train:
+            boxes_template = torch.zeros(len(self.choices), self.max_anns, 4 + 1)    # xyxy s
+            image_crops_template = torch.zeros(len(self.choices), self.max_anns, 3, *self.crop_size)
+
+            image_crops, boxes = [], []
+            _, h, w = new_image.shape
+            for i in range(len(self.choices)):
+                temp_image_crops, temp_boxes = self._obtain_image_crops(old_image, self.choices[i])
+                image_crops.append(temp_image_crops)
+                boxes.append(temp_boxes)
+
+                assert image_crops[i].shape[0] == boxes[i].shape[0]
+                boxes[i][:, :4] *= scale
+                boxes[i][:, [0, 2]] /= w
+                boxes[i][:, [1, 3]] /= h
+                
+                boxes_template[i][:boxes[i].shape[0], :4] = boxes[i]
+                boxes_template[i][:boxes[i].shape[0], 4] = 1.0
+
+                image_crops_template[i][:boxes[i].shape[0]] = image_crops[i]
         
-        boxes[:, [0, 2]] /= w
-        boxes[:, [1, 3]] /= h
+        else:
+            boxes_template = torch.zeros(self.max_anns, 4 + 1)    # xyxy s
+            image_crops_template = torch.zeros(self.max_anns, 3, *self.crop_size)
+            image_crops, boxes = self._obtain_image_crops(old_image,
+                                                        random.choice(self.choices))
+            assert image_crops.shape[0] == boxes.shape[0]
+            _, h, w = new_image.shape
+            
+            boxes[:, :4] *= scale
+            boxes[:, [0, 2]] /= w
+            boxes[:, [1, 3]] /= h
 
-        boxes_template[:boxes.shape[0], :4] = boxes
-        boxes_template[:boxes.shape[0], 4] = 1.0
-
-        image_crops_template[:boxes.shape[0]] = image_crops
+            boxes_template[:boxes.shape[0], :4] = boxes
+            boxes_template[:boxes.shape[0], 4] = 1.0
 
         return new_image, boxes_template, image_crops_template
 
