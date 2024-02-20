@@ -223,7 +223,9 @@ class CLIP(nn.Module):
 
     def encode_image(self, image, normalize: bool = False):
         features = self.visual(image)
-        return F.normalize(features, dim=-1) if normalize else features
+        # !
+        # return F.normalize(features, dim=-1) if normalize else features
+        return F.normalize(features[0], dim=-1), F.normalize(features[1], dim=-1) if normalize else features
 
     def encode_dense(self, image, normalize: bool = False, keep_shape=False):
         features = self.visual.encode_dense(image, keep_shape=keep_shape)
@@ -243,6 +245,7 @@ class CLIP(nn.Module):
         return features
 
     def _pool_masks(self, image, masks, normalize, mask_attn=False):
+        # mask_attn: False
         if mask_attn:
             mask_pooled = self.visual.mask_attn_pool(image, masks)
         else:
@@ -413,6 +416,19 @@ def convert_to_custom_text_state_dict(state_dict: dict):
         return new_state_dict
     return state_dict
 
+# !
+def rescale_positional_embedding(pos_emb, out_size):
+        h, w = out_size
+
+        rescaled_positional_embedding = \
+            pos_emb.new_zeros(1 + h*w, pos_emb.shape[-1])
+        rescaled_positional_embedding[0] = pos_emb[0]
+        pe_2d = pos_emb[1:].T.contiguous().view(
+            1, -1, 14,14)
+        pe_2d = F.interpolate(pe_2d, out_size, mode='bicubic', align_corners=False).view(-1, h*w)
+        rescaled_positional_embedding[1:] = pe_2d.T.contiguous()
+
+        return rescaled_positional_embedding
 
 def build_model_from_openai_state_dict(
         state_dict: dict,
@@ -470,6 +486,17 @@ def build_model_from_openai_state_dict(
         state_dict.pop(key, None)
 
     convert_weights_to_fp16(model)  # OpenAI state dicts are partially converted to float16
+
+    # ! cls token에 해당하는 PE 파라미터 증강
+    if 'visual.positional_embedding' in state_dict:
+        visual_pos_embedding = state_dict['visual.positional_embedding']
+        # print(f'visual pos emb shape: {visual_pos_embedding.shape}')
+        visual_pos_embedding = rescale_positional_embedding(visual_pos_embedding, (64,64))
+        augmented_cls_embedding = visual_pos_embedding[0, :].repeat(4095, 1) #patch 수 196개
+        visual_pos_embedding = torch.cat([augmented_cls_embedding, visual_pos_embedding], dim=0)
+        print(f'visual pos emb shape: {visual_pos_embedding.shape}')
+    state_dict['visual.positional_embedding'] = visual_pos_embedding
+
     model.load_state_dict(state_dict)
     return model.eval()
 
@@ -496,7 +523,10 @@ def resize_pos_embed(state_dict, model, interpolation: str = 'bicubic', antialia
     if old_pos_embed is None or not hasattr(model.visual, 'grid_size'):
         return
     grid_size = to_2tuple(model.visual.grid_size)
-    extra_tokens = 1  # FIXME detect different token configs (ie no class token, or more)
+
+    # ! increase cls tokens
+    extra_tokens = 4096  # FIXME detect different token configs (ie no class token, or more)
+
     new_seq_len = grid_size[0] * grid_size[1] + extra_tokens
     if new_seq_len == old_pos_embed.shape[0]:
         return

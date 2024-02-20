@@ -6,6 +6,7 @@ import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
+import torch.nn.functional as F
 
 import torch
 
@@ -97,12 +98,35 @@ def load_state_dict(checkpoint_path: str, map_location='cpu'):
         state_dict = {k[7:]: v for k, v in state_dict.items()}
     return state_dict
 
+# !
+def rescale_positional_embedding(pos_emb, out_size):
+        h, w = out_size
 
+        rescaled_positional_embedding = \
+            pos_emb.new_zeros(1 + h*w, pos_emb.shape[-1])
+        rescaled_positional_embedding[0] = pos_emb[0]
+        pe_2d = pos_emb[1:].T.contiguous().view(
+            1, -1, 14,14)
+        pe_2d = F.interpolate(pe_2d, out_size, mode='bicubic', align_corners=False).view(-1, h*w)
+        rescaled_positional_embedding[1:] = pe_2d.T.contiguous()
+
+        return rescaled_positional_embedding
+
+# ! load 했을 때, 이미 multi cls로 학습한 모델일 것
 def load_checkpoint(model, checkpoint_path, strict=True):
     state_dict = load_state_dict(checkpoint_path)
     # detect old format and make compatible with new format
     if 'positional_embedding' in state_dict and not hasattr(model, 'positional_embedding'):
         state_dict = convert_to_custom_text_state_dict(state_dict)
+
+    # ! method 1 : cls token에 해당하는 PE 파라미터를 195개 더 증강
+    if 'visual.positional_embedding' in state_dict:
+        visual_pos_embedding = state_dict['visual.positional_embedding']
+        visual_pos_embedding = rescale_positional_embedding(visual_pos_embedding, (64,64))
+        augmented_cls_embedding = visual_pos_embedding[0, :].repeat(4095, 1) # patch 수 196개
+        visual_pos_embedding = torch.cat([augmented_cls_embedding, visual_pos_embedding], dim=0)
+    state_dict['visual.positional_embedding'] = visual_pos_embedding
+
     resize_pos_embed(state_dict, model)
     incompatible_keys = model.load_state_dict(state_dict, strict=strict)
     return incompatible_keys
