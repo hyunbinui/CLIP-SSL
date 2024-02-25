@@ -193,7 +193,7 @@ class ResizeLongest(nn.Module):
 
 def get_scale(img, new_image):
     if isinstance(img, torch.Tensor):
-        height, width = img.shape[-2:]
+        height, width = new_image.shape[-2:]
     else:
         width, height = img.size
 

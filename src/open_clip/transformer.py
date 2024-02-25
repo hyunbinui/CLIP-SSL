@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 from torchvision.ops import roi_align
 from .utils import to_2tuple
+from math import sqrt
 
 
 class LayerNormFp32(nn.LayerNorm):
@@ -244,6 +245,59 @@ class ResidualAttentionBlock(nn.Module):
         x = x + self.ls_2(self.mlp(self.ln_2(x)))
         return x
 
+# ! 제대로된 attn mask 생성
+def create_attn_mask(num_tokens, device=None):
+    def _create_attn_mask_kernel(n_tokens, kernel_size, device=None):
+        attn_mask = torch.ones((n_tokens, n_tokens), dtype=torch.bool)
+
+        if device:
+            attn_mask = attn_mask.to(device)
+
+        all_pos = []
+        for i in range(n_tokens):
+            pos = []
+            n_tokens_side = int(sqrt(n_tokens))
+            for j in range(-(kernel_size//2),kernel_size//2+1):
+                for k in range(-(kernel_size//2),kernel_size//2+1):
+                    x, y = i // n_tokens_side, i % n_tokens_side
+                    pos.append((min(max(x + j, 0), n_tokens_side - 1) * n_tokens_side + min(max(y + k,0), n_tokens_side - 1)))
+            all_pos.append(pos)
+
+        for i, pos in enumerate(all_pos):
+            for p in pos:
+                attn_mask[i][p] = 0
+        
+        return attn_mask
+
+    tokens = num_tokens//2  
+    attn_mask_cls = torch.ones((tokens, num_tokens), dtype=torch.bool)
+    
+    for i in range(tokens):
+        attn_mask_cls[i, i] = 0
+        attn_mask_cls[i, tokens+i] = 0
+                
+    patches = num_tokens//2
+    attn_mask_image = torch.ones((patches, num_tokens), dtype=torch.bool)
+
+    for i in range(patches):
+        # attn_mask_image[i, tokens:] = 0
+        attn_mask_image[i, tokens+i] = 0
+        attn_mask_image[i,i] = 0
+
+    if device:
+        attn_mask_kernel = _create_attn_mask_kernel(tokens, 5, device)
+    else:
+        attn_mask_kernel = _create_attn_mask_kernel(tokens, 5)
+
+    # attn_mask_cls[:,tokens:] = attn_mask_kernel
+    # attn_mask_image[:,:tokens] = attn_mask_kernel
+
+    attn_mask_image[:,tokens:] = attn_mask_kernel
+
+    attn_mask = torch.cat((attn_mask_cls, attn_mask_image), dim=0)
+
+    return attn_mask.to(device) if device else attn_mask
+
 # !
 class VisionResidualAttentionBlock(nn.Module):
     def __init__(
@@ -287,43 +341,6 @@ class VisionResidualAttentionBlock(nn.Module):
         x = x + self.ls_2(self.mlp(self.ln_2(x)))
         return x
 
-    # ! 1 더해주는 방식
-    # def create_attn_mask(self, num_tokens):
-    #     tokens = num_tokens//2   # 0 -> -inf / 1 -> 0 
-    #     attn_mask_cls = torch.zeros((tokens, num_tokens))
-    #     for i in range(tokens):
-    #         attn_mask_cls[i, i] = 1
-    #         attn_mask_cls[i, tokens+i] = 1
-                
-    #     patches = num_tokens//2
-    #     attn_mask_image = torch.zeros((patches, num_tokens))
-    #     for i in range(patches):
-    #         attn_mask_image[i, tokens:] = 1
-    #         attn_mask_image[i,i] = 1
-
-    #     attn_mask = torch.cat((attn_mask_cls, attn_mask_image), dim=0)
-
-    #     return attn_mask  
-
-    # ! 제대로된 attn mask 생성
-    def create_attn_mask(self, num_tokens, device):
-        tokens = num_tokens//2  
-        attn_mask_cls = torch.ones((tokens, num_tokens), dtype=torch.bool, device=device)
-        for i in range(tokens):
-            attn_mask_cls[i, i] = 0
-            attn_mask_cls[i, tokens+i] = 0
-                    
-        patches = num_tokens//2
-        attn_mask_image = torch.ones((patches, num_tokens), dtype=torch.bool, device=device)
-        for i in range(patches):
-            attn_mask_image[i, tokens:] = 0
-            attn_mask_image[i,i] = 0
-
-        attn_mask = torch.cat((attn_mask_cls, attn_mask_image), dim=0)
-
-        return attn_mask
-
-
     def attention(
             self,
             q_x: torch.Tensor,
@@ -332,11 +349,7 @@ class VisionResidualAttentionBlock(nn.Module):
             attn_mask: Optional[torch.Tensor] = None,
     ):
         k_x = k_x if k_x is not None else q_x
-        v_x = v_x if v_x is not None else q_x
-
-        # ! attn mask 생성
-        if attn_mask is None:
-            attn_mask = self.create_attn_mask(q_x.size(0), device=q_x.device)        
+        v_x = v_x if v_x is not None else q_x         
 
         return self.attn(
             q_x, k_x, v_x, need_weights=False, attn_mask=attn_mask
@@ -391,7 +404,6 @@ class Transformer(nn.Module):
         self.grad_checkpointing = False
 
         self.resblocks = nn.ModuleList([
-            # ! ResidualAttentionBlockV2 -> ResidualAttentionBlock
             ResidualAttentionBlockV2(
                 width, heads, mlp_ratio, ls_init_value=ls_init_value, act_layer=act_layer, norm_layer=norm_layer)
             for _ in range(layers)
@@ -457,19 +469,31 @@ class VTransformer(nn.Module):
             return self.resblocks[0].mlp.c_fc.int8_original_dtype
         return self.resblocks[0].mlp.c_fc.weight.dtype
 
+    # ! use attn_mask
     def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
+        # print(f'open_clip transformer.py VTransformer.forward, x shape: {x.shape}')
+        n_token = x.shape[0] // 2
+        _attn_mask = create_attn_mask(n_token*2, x.device)
+        if attn_mask is not None:
+            _attn_mask[n_token:,n_token:] += attn_mask
+
         for r in self.resblocks:
             if self.grad_checkpointing and not torch.jit.is_scripting():
                 # TODO: handle kwargs https://github.com/pytorch/pytorch/issues/79887#issuecomment-1161758372
-                x = checkpoint(r, x, None, None, attn_mask)
+                x = checkpoint(r, x, None, None, _attn_mask)
             else:
-                x = r(x, attn_mask=attn_mask)
+                x = r(x, attn_mask=_attn_mask)
         return x
 
+    # ! use self.attn_mask
     def extract_feature_map(self, x, return_forward=False):
+        n_token = x.shape[0] // 2
+        _attn_mask = create_attn_mask(n_token*2, x.device)
+        # print(f'open_clip transformer.py VTransformer.extract_feature_map, attn_mask shape: {_attn_mask.shape}, n_token: {n_token}, x.shape: {x.shape}')
+
         for i in range(self.layers - 1):
-            x = self.resblocks[i](x)
-        x_forward = self.resblocks[-1](x)
+            x = self.resblocks[i](x, attn_mask=_attn_mask)
+        x_forward = self.resblocks[-1](x, attn_mask=_attn_mask)
         x = self.resblocks[-1].forward_without_attn(x)
 
         if return_forward:
@@ -477,12 +501,18 @@ class VTransformer(nn.Module):
         else:
             return x
 
+    # ! use self.attn_mask
     def forward_image_dense(self, x, attn_mask):
+        n_token = x.shape[0] // 2
+        _attn_mask = create_attn_mask(n_token*2, x.device)
+        if attn_mask is not None:
+            _attn_mask[n_token:,n_token:] += attn_mask
+
         for i in range(self.layers - 1):
-            x = self.resblocks[i](x, attn_mask=attn_mask)
+            x = self.resblocks[i](x, attn_mask=_attn_mask)
 
         dense = self.resblocks[-1].forward_without_attn(x)
-        image = self.resblocks[-1](x, attn_mask=attn_mask)
+        image = self.resblocks[-1](x, attn_mask=_attn_mask)
 
         return image, dense
 
@@ -533,9 +563,9 @@ class VisionTransformer(nn.Module):
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
 
-        # ! 증강된 cls patch 수만큼 PE 차원도 증강
+        # ! 증강된 cls patch 수만큼 PE 차원도 증강, PE 학습하는 기본 코드?
         # self.positional_embedding = nn.Parameter(scale * torch.randn(self.grid_size[0] * self.grid_size[1] + 1, width))
-        self.positional_embedding = nn.Parameter(scale * torch.randn(4096 * 2, width))
+        self.positional_embedding = nn.Parameter(scale * torch.randn(self.grid_size[0] * self.grid_size[1] * 2, width))
 
         # setting a patch_dropout of 0. would mean it is disabled and this function would be the identity fn
         self.patch_dropout = PatchDropout(patch_dropout) if patch_dropout > 0. else nn.Identity()
@@ -619,7 +649,8 @@ class VisionTransformer(nn.Module):
         # else:
         #     return x[:, 0], x[:, 1:]
         else:
-            cls_tokens = 4096
+            cls_tokens = x.shape[1] // 2
+            # print(f'open_clip/transformer.py _global_pool, x.shape: {x.shape} num_cls tokens: {cls_tokens}')
             return x[:, :cls_tokens], x[:, cls_tokens:]
 
     def forward(self, x: torch.Tensor):
@@ -647,12 +678,14 @@ class VisionTransformer(nn.Module):
         # ! expanded cls token
         expanded_cls_token = _expand_token(self.class_embedding, x.shape[0]).to(x.dtype) # shape = [*, 1, width]
         expanded_cls_token = expanded_cls_token.expand(-1, x.shape[1], -1) # shape = [*, grid**2, width]
+        # print(f'open_clip/transformer.py VisionTransformer.forward, expanded_cls_token.shape: {expanded_cls_token.shape}')
         x = torch.cat([expanded_cls_token, x], dim=1)  # shape = [*, (grid ** 2)*2, width]
+        # print(f'open_clip/transformer.py VisionTransformer.forward, expanded x.shape: {x.shape}')
 
-        # if (h, w) == self.grid_size:
-        pe = self.positional_embedding.to(x.dtype)
-        # else:
-        #     pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
+        if (h, w) == self.grid_size:
+            pe = self.positional_embedding.to(x.dtype)
+        else:
+            pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
 
         x = x + pe
 
@@ -746,16 +779,14 @@ class VisionTransformer(nn.Module):
         expanded_cls_token = expanded_cls_token.expand(-1, x.shape[1], -1) # shape = [*, grid**2, width]
         x = torch.cat([expanded_cls_token, x], dim=1)  # shape = [*, (grid ** 2)*2, width]
 
-        pe = self.positional_embedding.to(x.dtype)
-
         # x = torch.cat(
         #     [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
         #      x], dim=1)  # shape = [*, grid ** 2 + 1, width]
 
-        # if (h, w) == self.grid_size:
-        #     pe = self.positional_embedding.to(x.dtype)
-        # else:
-        #     pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
+        if (h, w) == self.grid_size:
+            pe = self.positional_embedding.to(x.dtype)
+        else:
+            pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
 
         x = x + pe
 
@@ -770,13 +801,13 @@ class VisionTransformer(nn.Module):
         if self.attn_pool is not None:
             x = self.attn_pool(x)
             x = self.ln_post(x)
-            # !
-            # _, tokens = self._global_pool(x)
-            tokens, _ = self._global_pool(x)
+            # ! dense vs cls
+            _, tokens = self._global_pool(x)
+            # tokens, _ = self._global_pool(x)
         else:
-            # !
-            # _, tokens = self._global_pool(x)
-            tokens, _ = self._global_pool(x)
+            # ! dense vs cls
+            _, tokens = self._global_pool(x)
+            # tokens, _ = self._global_pool(x)
             tokens = self.ln_post(tokens)
 
         if self.proj is not None:
@@ -804,17 +835,17 @@ class VisionTransformer(nn.Module):
         expanded_cls_token = expanded_cls_token.expand(-1, x.shape[1], -1) # shape = [*, grid**2, width]
         x = torch.cat([expanded_cls_token, x], dim=1)  # shape = [*, (grid ** 2)*2, width]
 
-        pe = self.positional_embedding.to(x.dtype)
+        # pe = self.positional_embedding.to(x.dtype)
         # class embeddings and positional embeddings
         # x = torch.cat(
         #     [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
         #      x], dim=1)  # shape = [*, grid ** 2 + 1, width]
         # # TODO: Allow interpolating the positional embeddings
 
-        # if (h, w) == self.grid_size:
-        #     pe = self.positional_embedding.to(x.dtype)
-        # else:
-        #     pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
+        if (h, w) == self.grid_size:
+            pe = self.positional_embedding.to(x.dtype)
+        else:
+            pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
 
         x = x + pe
 
@@ -900,15 +931,15 @@ class VisionTransformer(nn.Module):
         expanded_cls_token = expanded_cls_token.expand(-1, x.shape[1], -1) # shape = [*, grid**2, width]
         x = torch.cat([expanded_cls_token, x], dim=1)  # shape = [*, (grid ** 2)*2, width]
 
-        pe = self.positional_embedding.to(x.dtype)
+        # pe = self.positional_embedding.to(x.dtype)
 
         # x = torch.cat(
         #     [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
         #      x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-        # if (h, w) == self.grid_size:
-        #     pe = self.positional_embedding.to(x.dtype)
-        # else:
-        #     pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
+        if (h, w) == self.grid_size:
+            pe = self.positional_embedding.to(x.dtype)
+        else:
+            pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
 
         x = x + pe
 
@@ -923,13 +954,13 @@ class VisionTransformer(nn.Module):
         if self.attn_pool is not None:
             x = self.attn_pool(x)
             x = self.ln_post(x)
-            # !
-            # _, tokens = self._global_pool(x)
-            tokens, _ = self._global_pool(x)
+            # ! dense vs cls
+            _, tokens = self._global_pool(x)
+            # tokens, _ = self._global_pool(x)
         else:
-            # !
-            # _, tokens = self._global_pool(x)
-            tokens, _ = self._global_pool(x)
+            # ! dense vs cls
+            _, tokens = self._global_pool(x)
+            # tokens, _ = self._global_pool(x)
             tokens = self.ln_post(tokens)
 
         if self.proj is not None:
@@ -939,15 +970,22 @@ class VisionTransformer(nn.Module):
         return roi_align(tokens, self._denormalize_boxes(normed_boxes, tokens),
                          (1, 1), 1.0, -1, True)[..., 0, 0]
 
+    # !
     def rescale_positional_embedding(self, out_size, dtype):
+        len_cls = self.grid_size[0] * self.grid_size[1]
         h, w = out_size
+        # rescaled_positional_embedding = \
+        #     self.positional_embedding.new_zeros(1 + h*w, self.positional_embedding.shape[1])
+        # rescaled_positional_embedding[0] = self.positional_embedding[0]
+        # pe_2d = self.positional_embedding[1:].T.contiguous().view(
+        #     1, -1, *self.grid_size)
         rescaled_positional_embedding = \
-            self.positional_embedding.new_zeros(1 + h*w, self.positional_embedding.shape[1])
-        rescaled_positional_embedding[0] = self.positional_embedding[0]
-        pe_2d = self.positional_embedding[1:].T.contiguous().view(
+            self.positional_embedding.new_zeros(h*w*2, self.positional_embedding.shape[1])
+        rescaled_positional_embedding[:w*h] = self.positional_embedding[0,:].repeat(w*h,1)
+        pe_2d = self.positional_embedding[len_cls:].T.contiguous().view(
             1, -1, *self.grid_size)
         pe_2d = F.interpolate(pe_2d, out_size, mode='bicubic', align_corners=False).view(-1, h*w)
-        rescaled_positional_embedding[1:] = pe_2d.T.contiguous()
+        rescaled_positional_embedding[w*h:] = pe_2d.T.contiguous()
 
         return rescaled_positional_embedding.to(dtype=dtype)
 
@@ -1063,15 +1101,15 @@ class VisionTransformer(nn.Module):
         expanded_cls_token = expanded_cls_token.expand(-1, x.shape[1], -1) # shape = [*, grid**2, width]
         x = torch.cat([expanded_cls_token, x], dim=1)  # shape = [*, (grid ** 2)*2, width]
 
-        pe = self.positional_embedding.to(x.dtype)
+        # pe = self.positional_embedding.to(x.dtype)
 
         # x = torch.cat(
         #     [self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
         #      x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-        # if (h, w) == self.grid_size:
-        #     pe = self.positional_embedding.to(x.dtype)
-        # else:
-        #     pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
+        if (h, w) == self.grid_size:
+            pe = self.positional_embedding.to(x.dtype)
+        else:
+            pe = self.rescale_positional_embedding(out_size=(h, w), dtype=x.dtype)
 
         x = x + pe
 
